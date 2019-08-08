@@ -1,0 +1,310 @@
+-- Master tables:
+-- NewGen.E_ZAKAZ_ITEMS
+-- NEWGEN.E_ZAKAZ
+-- NEWGEN.E_ZAKAZ_DELIVERY
+-- koshovec.PLA_MARA
+
+-- result tables
+-- IK05_RAW_P_SALES_UNIT  -- статистика ср. кол БЕИ в 1 ПЕ
+-- IK05_order_time_distrib  -- распределение потока заказов накопительным итогом по суткам. Усреднение по 21 дням, предш тек дате
+-- IK05_orders_p_m   -- заказы по материалам
+
+
+--select "pav_order_id", count(*) from NEWGEN.E_ZAKAZ_DELIVERY group by "pav_order_id" having count(*) > 1;
+
+--select * from NEWGEN.E_ZAKAZ_DELIVERY where "delivery_store_id" = 0;
+
+
+Drop table IK05_E_ZAK_ZAK_DELIV;
+Create table IK05_E_ZAK_ZAK_DELIV
+as
+Select
+   trunc(T2."created", 'DD')   "Дата заказа",
+   T2."created"   "Дата-вр заказа",
+   T2.ZAKAZ_ID,
+   T2."pav_order_id",
+   T2.BUYER_ID,
+   T3."delivery_store_id"
+From
+   NEWGEN.E_ZAKAZ   T2
+   left outer join NEWGEN.E_ZAKAZ_DELIVERY   T3
+      on T3."pav_order_id" = T2."pav_order_id"
+Where
+   T2."created" >= Date '2014-01-01'
+   and
+   T2."archive" <> 1
+   and
+   T2."date_ans" Is Not Null
+   And
+   T2.STATUS > 0
+   And
+   T2.ANS Is Null
+;
+alter table IK05_E_ZAK_ZAK_DELIV add unique (ZAKAZ_ID);
+--select ZAKAZ_ID, count(*) from IK05_E_ZAK_ZAK_DELIV group by ZAKAZ_ID having count(*) > 1;
+
+
+Drop table IK05_ordersmade;
+Create table IK05_ordersmade
+Partition BY HASH("Материал") PARTITIONS 1024
+as
+Select
+   T2."Дата заказа",
+   T2."Дата-вр заказа",
+   T1."zakaz_id",
+   T2."pav_order_id",
+   T2."delivery_store_id",
+   T2.BUYER_ID,
+   T1."original_id"   "Материал",
+   T1."unit", 
+   T1."count_", 
+   T1."count_sap",
+   T1."count_sold",
+   T1."count_sold_base"
+From
+   IK05_E_ZAK_ZAK_DELIV   T2
+   Inner Join NewGen.E_ZAKAZ_ITEMS   T1
+      On T2.ZAKAZ_ID = T1."zakaz_id"
+Where
+   T1."count_" > 0
+;
+--select * from IK05_ordersmade;
+--select "delivery_store_id", count(*) from IK05_ordersmade group by "delivery_store_id" order by "delivery_store_id";
+
+Create bitmap index bmi_IK05_ordersmade on IK05_ordersmade ("Дата заказа") Local;
+Create bitmap index bmi2_IK05_ordersmade on IK05_ordersmade ("Материал") Local;
+
+
+Drop table IK05_order_head;
+Create table IK05_order_head
+as
+Select
+   "zakaz_id",
+   "Дата заказа",
+   "Дата-вр заказа",
+   "delivery_store_id",
+   count(*)   "Кол док-строк"
+From
+   IK05_ordersmade
+Group By
+   "zakaz_id",
+   "Дата заказа",
+   "Дата-вр заказа",
+   "delivery_store_id"
+;
+
+Create bitmap index i2_IK05_order_head on IK05_order_head ("Дата заказа");
+
+
+Drop table IK05_date_list;
+Create table IK05_date_list
+as
+select distinct "Дата заказа" from IK05_order_head
+;
+
+
+Drop table IK05_minute_list;
+Create table IK05_minute_list
+(
+   "Мин суток"   integer,
+   Primary key ("Мин суток")
+)
+;
+
+
+DECLARE
+   NN Integer;
+--   DD Date;
+BEGIN
+--   DD := trunc(Sysdate, 'DD');
+   NN := 24 * 60;
+   For K In 1 .. NN Loop
+      Insert Into IK05_minute_list values (K);
+   End Loop;
+End;
+/
+--Update IK05_date_range_list Set  "Метка даты заказа" = 1 Where "Дата" = trunc(Sysdate, 'DD');
+
+
+Drop table IK05_order_time_distrib_1;
+Create table IK05_order_time_distrib_1
+as
+Select
+   T1."delivery_store_id",
+   T_dates."Дата заказа",
+   T_minutes."Мин суток"   "Время, мин с нач суток",
+--   T1."Дата заказа",
+--   trunc((T1."Дата-вр заказа" - trunc(T1."Дата-вр заказа", 'DD'))*24*60) + 1   "Время, мин с нач суток",
+   count(distinct T1."zakaz_id")   "Кол разл заказов",
+   ratio_to_report(count(distinct T1."zakaz_id")) over (partition by T1."delivery_store_id", T_dates."Дата заказа")   "Плотн распр кол заказов"
+From
+   IK05_date_list   T_dates
+   cross join
+   IK05_minute_list   T_minutes
+   left outer join
+   IK05_order_head   T1
+      on T1."Дата заказа" = T_dates."Дата заказа"
+      and trunc((T1."Дата-вр заказа" - trunc(T1."Дата-вр заказа", 'DD'))*24*60) + 1 = T_minutes."Мин суток"
+where
+   T_dates."Дата заказа" >= trunc(Sysdate, 'DD') - 21
+group by
+   T1."delivery_store_id",
+   T_dates."Дата заказа",
+   T_minutes."Мин суток"
+order by
+   T1."delivery_store_id",
+   T_dates."Дата заказа",
+   T_minutes."Мин суток"
+;
+--select * from IK05_order_time_distrib_1;
+
+
+Drop table IK05_order_time_distrib_2;
+Create table IK05_order_time_distrib_2
+as
+Select
+   "delivery_store_id",
+   "Дата заказа",
+   "Время, мин с нач суток",
+   "Кол разл заказов",
+   "Плотн распр кол заказов",
+   sum("Плотн распр кол заказов") over (partition by "delivery_store_id", "Дата заказа" order by "Время, мин с нач суток" rows between unbounded preceding and current row)   "Распр кол заказов"
+From
+   IK05_order_time_distrib_1
+order by
+   "delivery_store_id",
+   "Дата заказа",
+   "Время, мин с нач суток"
+;
+
+
+Drop table IK05_order_time_distrib;
+Create table IK05_order_time_distrib  -- распределение потока заказов накопительным итогом по суткам. Усреднение по 21 дням, предш тек дате
+as
+Select
+   "delivery_store_id",
+   "Время, мин с нач суток",
+   round(avg("Распр кол заказов"), 4)   "Распр кол заказов"
+From
+   IK05_order_time_distrib_2
+group by
+   "delivery_store_id",
+   "Время, мин с нач суток"
+;
+
+
+drop table IK05_ordersmade_last;
+Create table IK05_ordersmade_last
+as
+Select * From IK05_ordersmade where  "Дата заказа" >= date '2017-01-01';
+
+
+drop table IK05_ordersmade_last_raw;
+Create table IK05_ordersmade_last_raw
+as
+select
+   t1.* 
+from
+   IK05_ordersmade_last   T1
+   inner join
+   koshovec.PLA_MARA   T2
+   on T2."Материал" = T1."Материал"
+   and T2."Вид материала" in ('FR03', 'FD03')
+;
+
+
+Drop table IK05_RAW_CONSUMPTION;
+Create table IK05_RAW_CONSUMPTION
+as
+Select
+   "delivery_store_id",
+   "Материал", 
+   "zakaz_id",
+   Rank() Over (Partition By "delivery_store_id", "Материал" Order By "zakaz_id" desc)   "Номер заказа в обр порядке", 
+   "count_sold",
+   "count_sold_base"
+From
+   IK05_ordersmade_last_raw
+Where
+   "count_sold" > 0
+;
+
+
+Drop table IK05_RAW_P_SALES_UNIT;
+Create table IK05_RAW_P_SALES_UNIT  -- статистика ср. кол БЕИ в 1 ПЕ
+as
+Select
+   "delivery_store_id",
+   "Материал", 
+   sum("count_sold_base")/sum("count_sold")   "Ср кол БЕИ в 1 ПЕ"
+From
+   IK05_RAW_CONSUMPTION
+Where
+   "Номер заказа в обр порядке" <= 1000
+Group By
+   "delivery_store_id",
+   "Материал"
+;
+
+
+Drop table IK05_orders_p_m;
+Create table IK05_orders_p_m   -- заказы по материалам
+as
+Select
+   T1."delivery_store_id",
+   T1."Дата заказа",
+   T1."Дата-вр заказа",
+   T1."zakaz_id",
+   T1."Материал",
+   T1."unit",
+   T1."count_"   "Заказанное кол ПЕ",
+   case 
+      when T2."Ср кол БЕИ в 1 ПЕ" is not null then T1."count_" * T2."Ср кол БЕИ в 1 ПЕ"
+      when T2."Ср кол БЕИ в 1 ПЕ" is null then T1."count_"
+   end   "Расчетн заказанное кол БЕИ"
+From
+   IK05_ordersmade   T1
+   left outer join
+   IK05_RAW_P_SALES_UNIT   T2
+      on T2."Материал" = T1."Материал"
+      and T2."delivery_store_id" = T1."delivery_store_id"
+;
+--select * from IK05_orders_p_m;
+
+
+Drop table IK05_orders_sta_p_day_mat;
+Create table IK05_orders_sta_p_day_mat
+as
+Select
+   "delivery_store_id",
+   "Дата заказа",
+   "Материал",
+   count("zakaz_id")   "Кол сдел заказов с материалом",
+   sum("Заказанное кол ПЕ")   "Сумма заказан кол материала,ПЕ",
+   sum("Расчетн заказанное кол БЕИ")   "Расчетн заказанное кол БЕИ"
+From
+   IK05_orders_p_m
+group by
+   "delivery_store_id",
+   "Дата заказа",
+   "Материал"
+;
+
+
+Drop table IK05_orders_sta_p_day;
+Create table IK05_orders_sta_p_day
+as
+Select
+   "delivery_store_id",
+   "Дата заказа",
+   count("zakaz_id")   "Общее кол заказов"
+From
+   IK05_order_head
+group by
+   "delivery_store_id",
+   "Дата заказа"
+;
+
+
+exit;
+
